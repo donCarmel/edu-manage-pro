@@ -9,7 +9,7 @@ class TeacherQualificationService extends BaseService {
       {
         model:      db.Employee,
         as:         'employee',
-        attributes: ['id', 'employeeCode', 'position', 'maxHoursWeek', 'status'],
+        attributes: ['id', 'employeeCode', 'position', 'status'],
         include: [{
           model:      db.User,
           as:         'user',
@@ -45,7 +45,7 @@ class TeacherQualificationService extends BaseService {
         model:      db.Employee,
         as:         'employee',
         where:      { status: 'active' },
-        attributes: ['id', 'employeeCode', 'position', 'maxHoursWeek', 'status'],
+        attributes: ['id', 'employeeCode', 'position', 'status'],
         include: [{
           model:      db.User,
           as:         'user',

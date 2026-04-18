@@ -60,6 +60,7 @@ var councilRouter            = require('./routes/council');
 var councilDecisionRouter    = require('./routes/council-decision');
 var activityLogRouter        = require('./routes/activity-log');
 var teacherRouter             = require('./routes/teacher-route');
+var teacherQualificationRouter = require('./routes/teacher-qualification-route');
 var app = express();
 
 // ─────────────────────────────────────────────
@@ -176,6 +177,9 @@ app.use(API + '/parent-meetings',      parentMeetingRouter);
 // Conseil de Classe
 app.use(API + '/councils',             councilRouter);
 app.use(API + '/council-decisions',    councilDecisionRouter);
+
+// Qualifications des enseignants
+app.use(API + '/teacher-qualifications', teacherQualificationRouter);
 
 // Logs système
 app.use(API + '/activity-logs',        activityLogRouter);
