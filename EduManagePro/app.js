@@ -61,6 +61,7 @@ var councilDecisionRouter    = require('./routes/council-decision');
 var activityLogRouter        = require('./routes/activity-log');
 var teacherRouter             = require('./routes/teacher-route');
 var teacherQualificationRouter = require('./routes/teacher-qualification-route');
+var studentParentRouter      = require('./routes/studentParentRoute');
 var app = express();
 
 // ─────────────────────────────────────────────
@@ -129,6 +130,7 @@ app.use(API + '/students',              studentRouter);
 app.use(API + '/parents',               parentRouter);
 app.use(API + '/enrollments',           enrollmentRouter);
 app.use(API + '/attendances',           attendanceRouter);
+app.use(API + '/students/:studentId/parents', studentParentRouter); // <-- route pour gérer les associations étudiants-parents
 
 // Ressources Humaines
 app.use(API + '/employees',             employeeRouter);

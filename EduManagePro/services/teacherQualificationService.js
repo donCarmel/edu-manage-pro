@@ -1,104 +1,131 @@
-'use strict';
-const { Op } = require('sequelize');
-const db      = require('../models');
-const BaseService = require('./BaseService');
+"use strict";
+const { Op, Sequelize } = require("sequelize");
+const db = require("../models");
+const BaseService = require("./BaseService");
 
 class TeacherQualificationService extends BaseService {
   constructor() {
     super(db.TeacherQualification, [
       {
-        model:      db.Employee,
-        as:         'employee',
-        attributes: ['id', 'employeeCode', 'position', 'status'],
-        include: [{
-          model:      db.User,
-          as:         'user',
-          attributes: ['id', 'firstName', 'lastName', 'email'],
-        }],
+        model: db.Employee,
+        as: "employee",
+        attributes: ["id", "employeeCode", "position", "status", "userId"],
+        include: [
+          {
+            model: db.User,
+            as: "user",
+            attributes: ["id", "firstName", "lastName", "email"],
+          },
+        ],
       },
       {
-        model:      db.Subject,
-        as:         'subject',
-        attributes: ['id', 'name', 'shortCode', 'coefficient'],
+        model: db.Subject,
+        as: "subject",
+        attributes: ["id", "name", "shortCode", "coefficient"],
       },
     ]);
   }
 
   // ── GET /teacher-qualifications/available ─────────────────────────────
-  // Trouve les profs disponibles pour une matière + cycle + heures données
-  async findAvailableTeachers({ subjectId, cycle, hoursNeeded = 2, academicYearId }) {
+  async findAvailableTeachers({
+    subjectId,
+    cycle,
+    hoursNeeded = 2,
+    academicYearId,
+  }) {
+    // 🔒 Validation
     if (!subjectId || !cycle) {
-      throw Object.assign(
-        new Error('subjectId et cycle sont obligatoires'),
-        { statusCode: 422 }
-      );
+      throw Object.assign(new Error("subjectId et cycle sont obligatoires"), {
+        statusCode: 422,
+      });
     }
 
-    // 1. Récupérer les qualifications actives pour cette matière + cycle
+    hoursNeeded = parseInt(hoursNeeded) || 2;
+
+    // ─────────────────────────────────────────────────────────────
+    // 1. Récupérer les qualifications valides
+    // ─────────────────────────────────────────────────────────────
     const qualifications = await db.TeacherQualification.findAll({
       where: {
         subjectId,
         isActive: true,
-        cycles:   { [Op.like]: `%${cycle}%` }, // JSON contains cycle
+        [Op.and]: [Sequelize.literal(`JSON_CONTAINS(cycles, '["${cycle}"]')`)],
       },
-      include: [{
-        model:      db.Employee,
-        as:         'employee',
-        where:      { status: 'active' },
-        attributes: ['id', 'employeeCode', 'position', 'status'],
-        include: [{
-          model:      db.User,
-          as:         'user',
-          attributes: ['id', 'firstName', 'lastName', 'email'],
-        }],
-      }],
+      include: [
+        {
+          model: db.Employee,
+          as: "employee",
+          where: { status: "active" },
+          attributes: ["id", "employeeCode", "position", "status", "userId"],
+          include: [
+            {
+              model: db.User,
+              as: "user",
+              attributes: ["id", "firstName", "lastName", "email"],
+            },
+          ],
+        },
+      ],
     });
 
     if (qualifications.length === 0) return [];
 
-    // 2. Pour chaque prof qualifié, calculer ses heures actuelles
+    // ─────────────────────────────────────────────────────────────
+    // 2. Calcul des disponibilités
+    // ─────────────────────────────────────────────────────────────
     const results = await Promise.all(
       qualifications.map(async (qual) => {
         const emp = qual.employee;
 
-        // Compter les heures déjà assignées (via class_subjects → userId)
-        const currentHours = await db.ClassSubject.sum('hoursWeek', {
-          where: { teacherId: emp.userId },
-          include: academicYearId ? [{
-            model:    db.Class,
-            as:       'class',
-            where:    { academicYearId },
-            required: true,
-          }] : [],
-        }) || 0;
+        // 🔢 Heures déjà assignées
+        const currentHours =
+          (await db.ClassSubject.sum("hoursWeek", {
+            where: { teacherId: emp.userId },
+            include: academicYearId
+              ? [
+                  {
+                    model: db.Class,
+                    as: "class",
+                    attributes: [],
+                    where: { academicYearId },
+                    required: true,
+                  },
+                ]
+              : [],
+          })) || 0;
 
-        const remaining = emp.maxHoursWeek - currentHours;
-        const canTake   = remaining >= hoursNeeded;
+        // ✅ CORRECTION ICI (utiliser qual.maxHoursWeek)
+        const maxHoursWeek = qual.maxHoursWeek;
+        const remaining = maxHoursWeek - currentHours;
+        const canTake = remaining >= hoursNeeded;
 
         return {
-          qualificationId:  qual.id,
-          employeeId:       emp.id,
-          userId:           emp.userId,
-          employeeCode:     emp.employeeCode,
-          firstName:        emp.user?.firstName,
-          lastName:         emp.user?.lastName,
-          email:            emp.user?.email,
-          expertiseLevel:   qual.expertiseLevel,
-          maxHoursWeek:     emp.maxHoursWeek,
+          qualificationId: qual.id,
+          employeeId: emp.id,
+          userId: emp.userId,
+          employeeCode: emp.employeeCode,
+          firstName: emp.user?.firstName,
+          lastName: emp.user?.lastName,
+          email: emp.user?.email,
+          expertiseLevel: qual.expertiseLevel,
+          maxHoursWeek,
           currentHours,
-          remainingHours:   remaining,
-          hoursNeeded:      parseInt(hoursNeeded),
+          remainingHours: remaining,
+          hoursNeeded,
           canTake,
-          // Message affiché dans le select
-          label: `${emp.user?.firstName} ${emp.user?.lastName} — ${emp.employeeCode} | ${currentHours}h/${emp.maxHoursWeek}h${canTake ? '' : ' ⛔ Quota dépassé'}`,
+
+          // 🎯 Label pour UI
+          label: `${emp.user?.firstName} ${emp.user?.lastName} — ${emp.employeeCode} | ${currentHours}h/${maxHoursWeek}h${canTake ? "" : " ⛔ Quota dépassé"}`,
         };
-      })
+      }),
     );
 
-    // Trier : disponibles en premier, puis par heures restantes décroissant
+    // ─────────────────────────────────────────────────────────────
+    // 3. Trier (disponibles en premier)
+    // ─────────────────────────────────────────────────────────────
     return results.sort((a, b) => {
       if (a.canTake && !b.canTake) return -1;
-      if (!a.canTake && b.canTake) return  1;
+      if (!a.canTake && b.canTake) return 1;
       return b.remainingHours - a.remainingHours;
     });
   }

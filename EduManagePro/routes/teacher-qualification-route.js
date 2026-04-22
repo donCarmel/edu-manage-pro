@@ -7,7 +7,7 @@ router.use(auth);
 
 // CRUD standard
 router.get   ('/',            ctrl.getAll);
-router.get   ('/available/id',   ctrl.getAvailable);   // ← DOIT être avant /:id
+router.get   ('/available/',   ctrl.getAvailable);   // ← DOIT être avant /:id
 router.get   ('/:id',         ctrl.getOne);
 router.post  ('/',            ctrl.create);
 router.put   ('/:id',         ctrl.update);

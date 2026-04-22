@@ -3,7 +3,6 @@ import Modal from "../ui/Modal";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3000/api/v1";
 
-// ── Hook fetch générique ──────────────────────────────────────────────────
 function useApi(url) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -24,6 +23,20 @@ const authHeader = () => ({
   Authorization: `Bearer ${localStorage.getItem("token")}`,
 });
 
+// ── Helpers ───────────────────────────────────────────────────────────────
+const getCycleFromGrade = (gradeNumber) => {
+  if (gradeNumber <= 6) return "PRIMAIRE";
+  if (gradeNumber <= 10) return "SECONDAIRE";
+  return "HUMANITES";
+};
+
+const cycleBadge = (cycle) =>
+  ({
+    PRIMAIRE: { label: "Primaire", color: "#3b82f6" },
+    SECONDAIRE: { label: "Secondaire", color: "#10b981" },
+    HUMANITES: { label: "Humanités", color: "#8b5cf6" },
+  })[cycle] || { label: cycle || "—", color: "#64748b" };
+
 // ── Constantes ────────────────────────────────────────────────────────────
 const EMPTY_FORM = {
   gradeNumber: "",
@@ -36,7 +49,6 @@ const EMPTY_FORM = {
 const DIVISIONS = ["A", "B", "C", "D", "E", "F"];
 const EMPTY_COURSE = {
   subjectId: "",
-  teacherId: "",
   hoursWeek: 2,
   applyToAll: true,
 };
@@ -47,13 +59,6 @@ function previewName(gradeNumber, division) {
   const suffix = g <= 6 ? "P" : g <= 10 ? "S" : "H";
   return `${g}${suffix}${division}`;
 }
-
-const cycleBadge = (cycle) =>
-  ({
-    PRIMAIRE: { label: "Primaire", color: "#3b82f6" },
-    SECONDAIRE: { label: "Secondaire", color: "#10b981" },
-    HUMANITES: { label: "Humanités", color: "#8b5cf6" },
-  })[cycle] || { label: cycle || "—", color: "#64748b" };
 
 // ── Formulaire classe ─────────────────────────────────────────────────────
 function ClassForm({
@@ -201,29 +206,31 @@ export default function Classes({ showToast }) {
   const [classes, setClasses] = useState([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
 
-  // Modals
   const [addOpen, setAddOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [courseOpen, setCourseOpen] = useState(false); // ← NOUVEAU
+  const [courseOpen, setCourseOpen] = useState(false);
 
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [courseForm, setCourseForm] = useState(EMPTY_COURSE); // ← NOUVEAU
+  const [courseForm, setCourseForm] = useState(EMPTY_COURSE);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [addingCourse, setAddingCourse] = useState(false); // ← NOUVEAU
+  const [addingCourse, setAddingCourse] = useState(false);
 
-  // Filtres
+  // ── Smart distribution state ──────────────────────────────────────────
+  const [availableTeachers, setAvailableTeachers] = useState([]);
+  const [loadingAvailable, setLoadingAvailable] = useState(false);
+  const [classAssignments, setClassAssignments] = useState({}); // { classId: userId }
+
   const [filterCycle, setFilterCycle] = useState("");
   const [search, setSearch] = useState("");
 
   const { data: academicYears, loading: loadingYears } =
     useApi("/academic-years");
   const { data: rooms, loading: loadingRooms } = useApi("/rooms");
-  const { data: subjects, loading: loadingSubjects } = useApi("/subjects"); // ← NOUVEAU
-  const { data: teachers, loading: loadingTeachers } = useApi("/employees"); // ← NOUVEAU (employees = teachers)
+  const { data: subjects, loading: loadingSubjects } = useApi("/subjects");
 
   // ── Fetch classes ─────────────────────────────────────────────────────
   const fetchClasses = () => {
@@ -239,58 +246,130 @@ export default function Classes({ showToast }) {
     fetchClasses();
   }, []);
 
-  const handleChange = (e) =>
-    setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
-  const handleCourseChange = (e) => {
-    const val =
-      e.target.type === "checkbox" ? e.target.checked : e.target.value;
-    setCourseForm((f) => ({ ...f, [e.target.name]: val }));
+  const getSiblingClasses = (cls) =>
+    classes.filter(
+      (c) =>
+        c.gradeNumber === cls.gradeNumber &&
+        c.academicYearId === cls.academicYearId,
+    );
+
+  // ── Fetch available teachers (smart distribution) ─────────────────────
+  const fetchAvailableTeachers = async (subjectId, gradeNumber, hoursWeek) => {
+    if (!subjectId || !gradeNumber) return;
+    const cycle = getCycleFromGrade(gradeNumber);
+    setLoadingAvailable(true);
+    setAvailableTeachers([]);
+    setClassAssignments({});
+    try {
+      const res = await fetch(
+        `${API}/teacher-qualifications/available?subjectId=${subjectId}&cycle=${cycle}&hoursNeeded=${hoursWeek || 2}`,
+        { headers: authHeader() },
+      );
+      const data = await res.json();
+      const teachers = data.data?.teachers || [];
+      setAvailableTeachers(teachers);
+
+      // Auto-distribuer les classes entre les profs disponibles
+      if (selected) {
+        const siblings = getSiblingClasses(selected);
+        autoDistribute(teachers, siblings, hoursWeek);
+      }
+    } catch {
+      showToast("Impossible de charger les enseignants disponibles", "error");
+    } finally {
+      setLoadingAvailable(false);
+    }
   };
+
+  // ── Auto-distribution intelligente ───────────────────────────────────
+  // Algorithme greedy : assigne chaque classe au prof qui a le plus d'heures restantes
+  const autoDistribute = (teachers, siblings, hoursWeek) => {
+    const canTake = teachers.filter((t) => t.canTake);
+    if (canTake.length === 0) {
+      // Aucun prof disponible → laisser vide
+      setClassAssignments({});
+      return;
+    }
+
+    const assignments = {};
+    const batchLoad = {}; // heures déjà assignées dans ce batch
+    canTake.forEach((t) => {
+      batchLoad[t.userId] = 0;
+    });
+
+    siblings.forEach((cls) => {
+      // Trouver le prof avec le plus d'heures restantes (net du batch en cours)
+      let best = canTake[0];
+      let bestRemaining = -Infinity;
+      for (const t of canTake) {
+        const remaining = t.remainingHours - (batchLoad[t.userId] || 0);
+        if (remaining > bestRemaining) {
+          bestRemaining = remaining;
+          best = t;
+        }
+      }
+      assignments[cls.id] = best.userId;
+      batchLoad[best.userId] =
+        (batchLoad[best.userId] || 0) + parseInt(hoursWeek || 2);
+    });
+
+    setClassAssignments(assignments);
+  };
+
+  // ── Réagir aux changements de subjectId / hoursWeek ──────────────────
+  useEffect(() => {
+    if (courseOpen && courseForm.subjectId && selected) {
+      fetchAvailableTeachers(
+        courseForm.subjectId,
+        selected.gradeNumber,
+        courseForm.hoursWeek,
+      );
+    } else {
+      setAvailableTeachers([]);
+      setClassAssignments({});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseForm.subjectId, courseForm.hoursWeek, courseOpen]);
 
   // ── Ouvrir modal cours ────────────────────────────────────────────────
   const openAddCourse = (c) => {
     setSelected(c);
     setCourseForm(EMPTY_COURSE);
+    setAvailableTeachers([]);
+    setClassAssignments({});
     setCourseOpen(true);
   };
 
-  // ── Trouver toutes les classes du même niveau (ex: tous les 1P) ───────
-  const getSiblingClasses = (cls) => {
-    return classes.filter(
-      (c) =>
-        c.gradeNumber === cls.gradeNumber &&
-        c.academicYearId === cls.academicYearId,
-    );
-  };
-
-  // ── ADD COURSE (avec option "appliquer à tout le niveau") ─────────────
+  // ── Ajouter cours avec distribution ──────────────────────────────────
   const handleAddCourse = async () => {
-    if (!courseForm.subjectId || !courseForm.teacherId) {
-      showToast("Matière et enseignant sont obligatoires", "error");
+    if (!courseForm.subjectId) {
+      showToast("Veuillez sélectionner une matière", "error");
       return;
     }
-    setAddingCourse(true);
-
-    // Si applyToAll → on récupère toutes les classes du même niveau
     const targetClasses = courseForm.applyToAll
       ? getSiblingClasses(selected)
       : [selected];
 
-    const suffix =
-      selected.gradeNumber <= 6 ? "P" : selected.gradeNumber <= 10 ? "S" : "H";
-    const levelLabel = `${selected.gradeNumber}${suffix}`;
+    // Vérifier que chaque classe a un prof assigné
+    for (const cls of targetClasses) {
+      if (!classAssignments[cls.id]) {
+        showToast(`Assignez un enseignant à la classe ${cls.name}`, "error");
+        return;
+      }
+    }
 
-    try {
-      let successCount = 0;
-      let errorCount = 0;
+    setAddingCourse(true);
+    let successCount = 0;
+    let errorCount = 0;
 
-      for (const cls of targetClasses) {
-        const body = {
-          classId: cls.id,
-          subjectId: parseInt(courseForm.subjectId),
-          teacherId: parseInt(courseForm.teacherId), // userId de l'enseignant
-          hoursWeek: parseInt(courseForm.hoursWeek) || 2,
-        };
+    for (const cls of targetClasses) {
+      const body = {
+        classId: cls.id,
+        subjectId: parseInt(courseForm.subjectId),
+        teacherId: parseInt(classAssignments[cls.id]),
+        hoursWeek: parseInt(courseForm.hoursWeek) || 2,
+      };
+      try {
         const res = await fetch(`${API}/class-subjects`, {
           method: "POST",
           headers: authHeader(),
@@ -298,33 +377,36 @@ export default function Classes({ showToast }) {
         });
         if (res.ok) successCount++;
         else errorCount++;
+      } catch {
+        errorCount++;
       }
-
-      if (successCount > 0 && errorCount === 0) {
-        const msg = courseForm.applyToAll
-          ? `✅ Cours ajouté aux ${successCount} classes du niveau ${levelLabel} (${targetClasses.map((c) => c.name).join(", ")})`
-          : `✅ Cours ajouté à la classe ${selected.name}`;
-        showToast(msg, "success");
-      } else if (successCount > 0) {
-        showToast(
-          `⚠️ ${successCount} réussi(s), ${errorCount} échoué(s)`,
-          "warning",
-        );
-      } else {
-        showToast("Erreur lors de l'ajout du cours", "error");
-      }
-
-      setCourseOpen(false);
-      setSelected(null);
-      setCourseForm(EMPTY_COURSE);
-    } catch {
-      showToast("Impossible de contacter le serveur", "error");
-    } finally {
-      setAddingCourse(false);
     }
+
+    const subjectName =
+      subjects.find((s) => s.id == courseForm.subjectId)?.name || "Cours";
+    if (successCount > 0 && errorCount === 0) {
+      const classNames = targetClasses.map((c) => c.name).join(", ");
+      showToast(`✅ ${subjectName} ajouté à : ${classNames}`, "success");
+    } else if (successCount > 0) {
+      showToast(
+        `⚠️ ${successCount} réussi(s), ${errorCount} échoué(s)`,
+        "warning",
+      );
+    } else {
+      showToast("Erreur lors de l'ajout du cours", "error");
+    }
+
+    setCourseOpen(false);
+    setSelected(null);
+    setCourseForm(EMPTY_COURSE);
+    setAvailableTeachers([]);
+    setClassAssignments({});
   };
 
-  // ── CREATE ────────────────────────────────────────────────────────────
+  // ── CRUD classes ──────────────────────────────────────────────────────
+  const handleChange = (e) =>
+    setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
+
   const handleCreate = async () => {
     if (!form.gradeNumber || !form.division || !form.academicYearId) {
       showToast(
@@ -365,7 +447,6 @@ export default function Classes({ showToast }) {
     }
   };
 
-  // ── OPEN EDIT ─────────────────────────────────────────────────────────
   const openEdit = (c) => {
     setSelected(c);
     setForm({
@@ -379,7 +460,6 @@ export default function Classes({ showToast }) {
     setEditOpen(true);
   };
 
-  // ── UPDATE ────────────────────────────────────────────────────────────
   const handleUpdate = async () => {
     if (!form.gradeNumber || !form.division || !form.academicYearId) {
       showToast(
@@ -421,7 +501,6 @@ export default function Classes({ showToast }) {
     }
   };
 
-  // ── DELETE ────────────────────────────────────────────────────────────
   const handleDelete = async () => {
     setDeleting(true);
     try {
@@ -453,14 +532,11 @@ export default function Classes({ showToast }) {
     return matchCycle && matchSearch;
   });
 
-  // ── Stats ─────────────────────────────────────────────────────────────
   const total = classes.length;
   const primaire = classes.filter((c) => c.cycle === "PRIMAIRE").length;
   const second = classes.filter((c) => c.cycle === "SECONDAIRE").length;
   const humaines = classes.filter((c) => c.cycle === "HUMANITES").length;
 
-  // ═════════════════════════════════════════════════════════════════════
-  // RENDU
   // ═════════════════════════════════════════════════════════════════════
   return (
     <div className="page-enter">
@@ -582,7 +658,6 @@ export default function Classes({ showToast }) {
               const siblings = getSiblingClasses(c);
               const suffix =
                 c.gradeNumber <= 6 ? "P" : c.gradeNumber <= 10 ? "S" : "H";
-
               return (
                 <div
                   key={c.id}
@@ -601,7 +676,6 @@ export default function Classes({ showToast }) {
                     (e.currentTarget.style.borderColor = "var(--border)")
                   }
                 >
-                  {/* En-tête */}
                   <div
                     style={{
                       display: "flex",
@@ -645,7 +719,6 @@ export default function Classes({ showToast }) {
                     </span>
                   </div>
 
-                  {/* Grille infos */}
                   <div
                     style={{
                       display: "grid",
@@ -684,7 +757,6 @@ export default function Classes({ showToast }) {
                     </div>
                   </div>
 
-                  {/* Frères de niveau */}
                   <div
                     style={{
                       marginBottom: 10,
@@ -747,7 +819,6 @@ export default function Classes({ showToast }) {
                       </span>
                     </div>
                   )}
-
                   {fill > 0 && (
                     <div style={{ marginBottom: 14 }}>
                       <div
@@ -784,7 +855,6 @@ export default function Classes({ showToast }) {
                     </div>
                   )}
 
-                  {/* ── Actions ── */}
                   <div
                     style={{
                       display: "flex",
@@ -793,7 +863,6 @@ export default function Classes({ showToast }) {
                       marginTop: 12,
                     }}
                   >
-                    {/* Bouton Ajouter Cours — mis en valeur */}
                     <button
                       onClick={() => openAddCourse(c)}
                       style={{
@@ -820,8 +889,6 @@ export default function Classes({ showToast }) {
                         {suffix}
                       </span>
                     </button>
-
-                    {/* Détails / Modifier / Supprimer */}
                     <div style={{ display: "flex", gap: 6 }}>
                       <button
                         className="btn btn-primary btn-sm"
@@ -867,7 +934,7 @@ export default function Classes({ showToast }) {
       </div>
 
       {/* ══════════════════════════════════════════════════════════════════
-          Modal — AJOUTER UN COURS
+          Modal — AJOUTER UN COURS (Distribution intelligente)
       ══════════════════════════════════════════════════════════════════ */}
       {selected &&
         courseOpen &&
@@ -880,6 +947,28 @@ export default function Classes({ showToast }) {
                 ? "S"
                 : "H";
           const levelLabel = `${selected.gradeNumber}${suffix}`;
+          const cycle = getCycleFromGrade(selected.gradeNumber);
+          const badge = cycleBadge(cycle);
+          const targetClasses = courseForm.applyToAll ? siblings : [selected];
+
+          // Résumé de la distribution : combien de classes par prof
+          const distributionSummary = {};
+          targetClasses.forEach((cls) => {
+            const userId = classAssignments[cls.id];
+            if (userId) {
+              const t = availableTeachers.find((t) => t.userId == userId);
+              if (t) {
+                const name = `${t.firstName} ${t.lastName}`;
+                if (!distributionSummary[name]) distributionSummary[name] = [];
+                distributionSummary[name].push(cls.name);
+              }
+            }
+          });
+
+          const allAssigned = targetClasses.every(
+            (c) => classAssignments[c.id],
+          );
+
           return (
             <Modal
               isOpen={courseOpen}
@@ -887,6 +976,8 @@ export default function Classes({ showToast }) {
                 setCourseOpen(false);
                 setSelected(null);
                 setCourseForm(EMPTY_COURSE);
+                setAvailableTeachers([]);
+                setClassAssignments({});
               }}
               title={`📚 Ajouter un cours — Niveau ${levelLabel}`}
               footer={
@@ -897,13 +988,17 @@ export default function Classes({ showToast }) {
                       setCourseOpen(false);
                       setSelected(null);
                       setCourseForm(EMPTY_COURSE);
+                      setAvailableTeachers([]);
+                      setClassAssignments({});
                     }}
                   >
                     Annuler
                   </button>
                   <button
                     onClick={handleAddCourse}
-                    disabled={addingCourse}
+                    disabled={
+                      addingCourse || !courseForm.subjectId || !allAssigned
+                    }
                     style={{
                       padding: "10px 20px",
                       background: "linear-gradient(135deg,#10b981,#059669)",
@@ -912,12 +1007,15 @@ export default function Classes({ showToast }) {
                       color: "white",
                       fontWeight: 600,
                       cursor: "pointer",
-                      opacity: addingCourse ? 0.7 : 1,
+                      opacity:
+                        addingCourse || !courseForm.subjectId || !allAssigned
+                          ? 0.5
+                          : 1,
                     }}
                   >
                     {addingCourse
                       ? "Ajout en cours…"
-                      : `Ajouter${courseForm.applyToAll ? ` aux ${siblings.length} classes` : " à cette classe"}`}
+                      : `Confirmer (${targetClasses.length} classe${targetClasses.length > 1 ? "s" : ""})`}
                   </button>
                 </>
               }
@@ -925,7 +1023,7 @@ export default function Classes({ showToast }) {
               <div
                 style={{ display: "flex", flexDirection: "column", gap: 18 }}
               >
-                {/* Option appliquer à tout le niveau */}
+                {/* Sélecteur applyToAll */}
                 <div
                   style={{
                     background: courseForm.applyToAll
@@ -933,7 +1031,7 @@ export default function Classes({ showToast }) {
                       : "var(--primary)",
                     border: `1px solid ${courseForm.applyToAll ? "#10b98155" : "var(--border)"}`,
                     borderRadius: 12,
-                    padding: 16,
+                    padding: 14,
                     cursor: "pointer",
                   }}
                   onClick={() =>
@@ -972,7 +1070,7 @@ export default function Classes({ showToast }) {
                           marginTop: 2,
                         }}
                       >
-                        Le cours sera ajouté simultanément à :
+                        Classes concernées :
                         <span style={{ color: "#10b981", fontWeight: 600 }}>
                           {" "}
                           {siblings.map((s) => s.name).join(", ")}
@@ -982,32 +1080,19 @@ export default function Classes({ showToast }) {
                   </div>
                 </div>
 
-                {/* Si pas applyToAll → afficher seulement la classe sélectionnée */}
-                {!courseForm.applyToAll && (
-                  <div
-                    style={{
-                      background: "rgba(59,130,246,.08)",
-                      border: "1px solid rgba(59,130,246,.25)",
-                      borderRadius: 10,
-                      padding: "10px 14px",
-                      fontSize: 13,
-                      color: "#93c5fd",
-                    }}
-                  >
-                    ℹ️ Le cours sera ajouté uniquement à la classe{" "}
-                    <strong>{selected.name}</strong>
-                  </div>
-                )}
-
+                {/* Matière + heures */}
                 <div className="form-grid">
-                  {/* Matière */}
                   <div className="form-group" style={{ gridColumn: "1/-1" }}>
                     <label className="form-label">Matière *</label>
                     <select
                       className="form-select"
-                      name="subjectId"
                       value={courseForm.subjectId}
-                      onChange={handleCourseChange}
+                      onChange={(e) =>
+                        setCourseForm((f) => ({
+                          ...f,
+                          subjectId: e.target.value,
+                        }))
+                      }
                     >
                       <option value="">— Sélectionner une matière —</option>
                       {loadingSubjects ? (
@@ -1015,113 +1100,317 @@ export default function Classes({ showToast }) {
                       ) : (
                         subjects.map((s) => (
                           <option key={s.id} value={s.id}>
-                            {s.name} {s.shortCode ? `(${s.shortCode})` : ""}{" "}
-                            {s.coefficient ? `— Coeff. ${s.coefficient}` : ""}
+                            {s.name}
+                            {s.shortCode ? ` (${s.shortCode})` : ""}
+                            {s.coefficient ? ` — Coeff. ${s.coefficient}` : ""}
                           </option>
                         ))
                       )}
                     </select>
                   </div>
-
-                  {/* Enseignant */}
-                  <div className="form-group" style={{ gridColumn: "1/-1" }}>
-                    <label className="form-label">Enseignant *</label>
-                    <select
-                      className="form-select"
-                      name="teacherId"
-                      value={courseForm.teacherId}
-                      onChange={handleCourseChange}
-                    >
-                      <option value="">— Sélectionner un enseignant —</option>
-                      {loadingTeachers ? (
-                        <option disabled>Chargement…</option>
-                      ) : (
-                        teachers
-                          .filter((t) => t.user)
-                          .map((t) => (
-                            <option key={t.id} value={t.user.id}>
-                              {t.user.firstName} {t.user.lastName}
-                              {t.position ? ` — ${t.position}` : ""}
-                              {t.employeeCode ? ` (${t.employeeCode})` : ""}
-                            </option>
-                          ))
-                      )}
-                    </select>
-                  </div>
-
-                  {/* Heures / semaine */}
                   <div className="form-group">
                     <label className="form-label">Heures / semaine</label>
                     <input
                       className="form-input"
                       type="number"
-                      name="hoursWeek"
-                      value={courseForm.hoursWeek}
-                      onChange={handleCourseChange}
                       min={1}
                       max={20}
+                      value={courseForm.hoursWeek}
+                      onChange={(e) =>
+                        setCourseForm((f) => ({
+                          ...f,
+                          hoursWeek: e.target.value,
+                        }))
+                      }
                     />
                   </div>
+                  <div
+                    className="form-group"
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-end",
+                      paddingBottom: 2,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--text-muted)",
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      🔍 Cycle détecté :{" "}
+                      <span style={{ color: badge.color, fontWeight: 700 }}>
+                        {badge.label}
+                      </span>
+                      <br />
+                      Les profs sont filtrés par ce cycle.
+                    </div>
+                  </div>
+                </div>
 
-                  {/* Résumé */}
-                  {courseForm.subjectId && courseForm.teacherId && (
-                    <div className="form-group" style={{ gridColumn: "1/-1" }}>
+                {/* Zone de distribution */}
+                {courseForm.subjectId && (
+                  <div>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        marginBottom: 10,
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      👥 DISTRIBUTION DES ENSEIGNANTS
+                      {loadingAvailable && (
+                        <span
+                          style={{ marginLeft: 8, fontSize: 11, opacity: 0.7 }}
+                        >
+                          Recherche en cours…
+                        </span>
+                      )}
+                    </div>
+
+                    {loadingAvailable ? (
                       <div
                         style={{
-                          background: "var(--primary)",
-                          border: "1px solid var(--accent)",
-                          borderRadius: 10,
-                          padding: 14,
+                          textAlign: "center",
+                          padding: 20,
+                          color: "var(--text-muted)",
                         }}
                       >
+                        Recherche des enseignants disponibles…
+                      </div>
+                    ) : availableTeachers.length === 0 ? (
+                      <div
+                        style={{
+                          textAlign: "center",
+                          padding: 16,
+                          background: "rgba(239,68,68,.08)",
+                          border: "1px solid rgba(239,68,68,.2)",
+                          borderRadius: 10,
+                          color: "#f87171",
+                          fontSize: 13,
+                        }}
+                      >
+                        ⚠️ Aucun enseignant qualifié trouvé pour cette matière
+                        en cycle {badge.label}.
+                        <br />
+                        <span style={{ fontSize: 12, opacity: 0.8 }}>
+                          Vérifiez les qualifications ou réduisez les heures
+                          requises.
+                        </span>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Légende disponibilité */}
                         <div
                           style={{
+                            display: "flex",
+                            gap: 12,
+                            marginBottom: 12,
                             fontSize: 11,
-                            color: "var(--text-muted)",
-                            marginBottom: 8,
                           }}
                         >
-                          📋 RÉSUMÉ
+                          <span style={{ color: "#10b981" }}>● Disponible</span>
+                          <span style={{ color: "#f59e0b" }}>
+                            ● Quota réduit
+                          </span>
+                          <span style={{ color: "#ef4444" }}>
+                            ● Quota dépassé
+                          </span>
                         </div>
-                        <div style={{ fontSize: 13, lineHeight: 1.8 }}>
-                          <div>
-                            📚 Matière :{" "}
-                            <strong>
-                              {subjects.find(
-                                (s) => s.id == courseForm.subjectId,
-                              )?.name || "—"}
-                            </strong>
-                          </div>
-                          <div>
-                            👤 Enseignant :{" "}
-                            <strong>
-                              {(() => {
-                                const t = teachers.find(
-                                  (t) => t.id == courseForm.teacherId,
-                                );
-                                return t
-                                  ? `${t.firstName || t.first_name} ${t.lastName || t.last_name}`
-                                  : "—";
-                              })()}
-                            </strong>
-                          </div>
-                          <div>
-                            ⏱️ Heures/semaine :{" "}
-                            <strong>{courseForm.hoursWeek}h</strong>
-                          </div>
-                          <div>
-                            🏫 Classes concernées :{" "}
-                            <strong style={{ color: "#10b981" }}>
-                              {courseForm.applyToAll
-                                ? siblings.map((s) => s.name).join(", ")
-                                : selected.name}
-                            </strong>
-                          </div>
+
+                        {/* Tableau d'assignation par classe */}
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 8,
+                          }}
+                        >
+                          {targetClasses.map((cls) => {
+                            const assigned = classAssignments[cls.id];
+                            const assignedT = availableTeachers.find(
+                              (t) => t.userId == assigned,
+                            );
+                            const b = cycleBadge(cls.cycle);
+                            return (
+                              <div
+                                key={cls.id}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 12,
+                                  background: "var(--primary)",
+                                  borderRadius: 10,
+                                  padding: "10px 14px",
+                                  border: `1px solid ${assigned ? b.color + "44" : "var(--border)"}`,
+                                }}
+                              >
+                                {/* Nom classe */}
+                                <div
+                                  style={{
+                                    minWidth: 48,
+                                    fontSize: 18,
+                                    fontWeight: 800,
+                                    color: b.color,
+                                    letterSpacing: 1,
+                                  }}
+                                >
+                                  {cls.name}
+                                </div>
+
+                                {/* Dropdown enseignant */}
+                                <select
+                                  className="form-select"
+                                  style={{ flex: 1 }}
+                                  value={assigned || ""}
+                                  onChange={(e) =>
+                                    setClassAssignments((a) => ({
+                                      ...a,
+                                      [cls.id]: e.target.value,
+                                    }))
+                                  }
+                                >
+                                  <option value="">
+                                    — Choisir un enseignant —
+                                  </option>
+                                  {availableTeachers.map((t) => (
+                                    <option
+                                      key={t.userId}
+                                      value={t.userId}
+                                      disabled={!t.canTake}
+                                      style={{
+                                        color: t.canTake
+                                          ? "inherit"
+                                          : "#ef4444",
+                                      }}
+                                    >
+                                      {t.firstName} {t.lastName} —{" "}
+                                      {t.employeeCode} | {t.currentHours}h/
+                                      {t.maxHoursWeek}h
+                                      {!t.canTake
+                                        ? " ⛔ Quota dépassé"
+                                        : ` ✓ ${t.remainingHours}h restantes`}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                {/* Badge heures du prof assigné */}
+                                {assignedT && (
+                                  <div
+                                    style={{
+                                      minWidth: 70,
+                                      textAlign: "center",
+                                      fontSize: 11,
+                                      padding: "4px 8px",
+                                      borderRadius: 8,
+                                      background: assignedT.canTake
+                                        ? "rgba(16,185,129,.15)"
+                                        : "rgba(239,68,68,.15)",
+                                      color: assignedT.canTake
+                                        ? "#10b981"
+                                        : "#f87171",
+                                      border: `1px solid ${assignedT.canTake ? "rgba(16,185,129,.3)" : "rgba(239,68,68,.3)"}`,
+                                    }}
+                                  >
+                                    {assignedT.currentHours}h /{" "}
+                                    {assignedT.maxHoursWeek}h
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
+
+                        {/* Résumé de la distribution */}
+                        {Object.keys(distributionSummary).length > 0 && (
+                          <div
+                            style={{
+                              marginTop: 14,
+                              background: "rgba(16,185,129,.06)",
+                              border: "1px solid rgba(16,185,129,.2)",
+                              borderRadius: 10,
+                              padding: 14,
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: "var(--text-muted)",
+                                marginBottom: 8,
+                                fontWeight: 700,
+                              }}
+                            >
+                              📋 RÉSUMÉ DE LA DISTRIBUTION
+                            </div>
+                            {Object.entries(distributionSummary).map(
+                              ([name, clsList]) => (
+                                <div
+                                  key={name}
+                                  style={{
+                                    fontSize: 13,
+                                    marginBottom: 4,
+                                    display: "flex",
+                                    gap: 8,
+                                    alignItems: "center",
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontWeight: 700,
+                                      color: "#10b981",
+                                    }}
+                                  >
+                                    {name}
+                                  </span>
+                                  <span style={{ color: "var(--text-muted)" }}>
+                                    →
+                                  </span>
+                                  <span>{clsList.join(", ")}</span>
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      color: "var(--text-muted)",
+                                    }}
+                                  >
+                                    ({clsList.length} classe
+                                    {clsList.length > 1 ? "s" : ""} ×{" "}
+                                    {courseForm.hoursWeek}h)
+                                  </span>
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        )}
+
+                        {/* Bouton re-distribuer automatiquement */}
+                        <button
+                          onClick={() =>
+                            autoDistribute(
+                              availableTeachers,
+                              targetClasses,
+                              courseForm.hoursWeek,
+                            )
+                          }
+                          style={{
+                            marginTop: 10,
+                            width: "100%",
+                            padding: "8px 0",
+                            background: "transparent",
+                            border: "1px dashed var(--border)",
+                            borderRadius: 8,
+                            color: "var(--text-muted)",
+                            cursor: "pointer",
+                            fontSize: 12,
+                          }}
+                        >
+                          🔄 Re-distribuer automatiquement
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </Modal>
           );
