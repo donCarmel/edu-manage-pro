@@ -62,6 +62,7 @@ var activityLogRouter        = require('./routes/activity-log');
 var teacherRouter             = require('./routes/teacher-route');
 var teacherQualificationRouter = require('./routes/teacher-qualification-route');
 var studentParentRouter      = require('./routes/studentParentRoute');
+var uploadRouter              = require('./routes/uploadRoutes');
 var app = express();
 
 // ─────────────────────────────────────────────
@@ -183,6 +184,10 @@ app.use(API + '/council-decisions',    councilDecisionRouter);
 // Qualifications des enseignants
 app.use(API + '/teacher-qualifications', teacherQualificationRouter);
 
+app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
+
+// Upload de photos
+app.use(API + '/upload',               uploadRouter);
 // Logs système
 app.use(API + '/activity-logs',        activityLogRouter);
 app.use(API + '/teachers',             teacherRouter);
